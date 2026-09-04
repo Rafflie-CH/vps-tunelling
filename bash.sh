@@ -1,9 +1,8 @@
 #!/bin/bash
-# =========================================================
-# Load Balancer Proses - Eksekusi Perintah ke Worker
-# Tanpa login pihak ketiga, hanya SSH + key
-# Support batch input & tanpa sudo/systemd
-# =========================================================
+# ================================================================
+# LOAD BALANCER PINTAR - Auto Redirect Semua Proses ke Worker
+# Tanpa ubah kode, support PM2, auto install dependensi worker
+# ================================================================
 
 set -e
 trap 'echo -e "\n❌ Error fatal. Script berhenti."; exit 1' ERR
@@ -15,11 +14,19 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${GREEN}=================================================${NC}"
-echo -e "${GREEN}  Load Balancer Perintah (Round-Robin via SSH)  ${NC}"
-echo -e "${GREEN}=================================================${NC}"
+echo -e "${GREEN}============================================================${NC}"
+echo -e "${GREEN}     LOAD BALANCER PINTAR - Auto Redirect ke Worker         ${NC}"
+echo -e "${GREEN}============================================================${NC}"
 
-# --- Fungsi untuk prompt dengan back & exit (single mode) ---
+# --- Konfigurasi ---
+WORKER_FILE="/etc/loadbalancer/workers"
+INDEX_FILE="/tmp/run_roundrobin_index"
+WRAPPER_FILE="/usr/local/bin/run-wrapper"
+
+mkdir -p /etc/loadbalancer
+touch "$WORKER_FILE"
+
+# --- Fungsi untuk prompt dengan back & exit ---
 prompt_with_back_exit() {
     local prompt_msg="$1"
     local default_val="$2"
@@ -27,59 +34,36 @@ prompt_with_back_exit() {
     while true; do
         if [ -n "$default_val" ]; then
             read -p "$prompt_msg (default: $default_val): " input
-            if [ -z "$input" ]; then input="$default_val"; fi
+            [ -z "$input" ] && input="$default_val"
         else
             read -p "$prompt_msg: " input
         fi
         case "$input" in
-            exit)
-                echo -e "${RED}Instalasi dibatalkan.${NC}"
-                exit 0
-                ;;
-            back)
-                return 1
-                ;;
-            *)
-                echo "$input"
-                return 0
-                ;;
+            exit) echo -e "${RED}Dibatalkan.${NC}"; exit 0 ;;
+            back) return 1 ;;
+            *) echo "$input"; return 0 ;;
         esac
     done
 }
 
 prompt_password() {
-    local prompt_msg="$1"
     local input
     while true; do
-        read -s -p "$prompt_msg: " input
+        read -s -p "Password root: " input
         echo
-        if [ -z "$input" ]; then
-            echo -e "${RED}Password tidak boleh kosong.${NC}"
-            continue
-        fi
+        [ -z "$input" ] && echo -e "${RED}Password tidak boleh kosong.${NC}" && continue
         case "$input" in
-            exit)
-                echo -e "${RED}Instalasi dibatalkan.${NC}"
-                exit 0
-                ;;
-            back)
-                return 1
-                ;;
-            *)
-                echo "$input"
-                return 0
-                ;;
+            exit) echo -e "${RED}Dibatalkan.${NC}"; exit 0 ;;
+            back) return 1 ;;
+            *) echo "$input"; return 0 ;;
         esac
     done
 }
 
-# --- Fungsi untuk menambahkan worker (dengan retry jika gagal) ---
+# --- Fungsi tambah worker ---
 add_worker() {
-    local ip="$1"
-    local port="$2"
-    local pass="$3"
-    local max_retry=2
-    local attempt=0
+    local ip="$1" port="$2" pass="$3"
+    local max_retry=2 attempt=0
     while [ $attempt -lt $max_retry ]; do
         if sshpass -p "$pass" ssh-copy-id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$port" root@"$ip" 2>/dev/null; then
             echo "$ip:$port" >> "$WORKER_FILE"
@@ -89,380 +73,344 @@ add_worker() {
         attempt=$((attempt+1))
         sleep 1
     done
-    echo -e "${RED}  ✗ Worker $ip:$port gagal (password salah atau koneksi)${NC}"
+    echo -e "${RED}  ✗ Worker $ip:$port gagal${NC}"
     return 1
 }
 
-# --- 1. Install sshpass (tanpa sudo) ---
-echo -e "${GREEN}[1/6] Install sshpass...${NC}"
+# --- Fungsi install dependensi di worker ---
+install_deps_worker() {
+    local ip="$1" port="$2"
+    echo -e "${BLUE}  ➔ Install dependensi di $ip:$port...${NC}"
+    ssh -p "$port" -o StrictHostKeyChecking=no root@"$ip" '
+        apt-get update -qq
+        apt-get install -y -qq python3 python3-pip nodejs npm ffmpeg imagemagick curl wget git
+        # Tambahkan yang lain sesuai kebutuhan
+        echo "Dependencies installed"
+    ' 2>/dev/null && echo -e "${GREEN}  ✓ Dependencies installed di $ip${NC}" || echo -e "${RED}  ✗ Gagal install di $ip${NC}"
+}
+
+# --- 1. Install sshpass di utama ---
+echo -e "${GREEN}[1/7] Install sshpass...${NC}"
 if ! command -v sshpass &> /dev/null; then
     apt-get update -qq && apt-get install sshpass -y -qq
 fi
 
 # --- 2. Generate SSH key ---
-echo -e "${GREEN}[2/6] Pastikan SSH key tersedia...${NC}"
-if [ ! -f ~/.ssh/id_rsa ]; then
-    ssh-keygen -t rsa -b 2048 -f ~/.ssh/id_rsa -N ""
-fi
+echo -e "${GREEN}[2/7] Pastikan SSH key tersedia...${NC}"
+[ ! -f ~/.ssh/id_rsa ] && ssh-keygen -t rsa -b 2048 -f ~/.ssh/id_rsa -N ""
 
-# --- 3. Minta jumlah worker ---
-echo -e "${YELLOW}Masukkan jumlah VPS worker:${NC}"
-WORKER_COUNT=$(prompt_with_back_exit "Jumlah worker" "")
-if ! [[ "$WORKER_COUNT" =~ ^[0-9]+$ ]] || [ "$WORKER_COUNT" -eq 0 ]; then
-    echo -e "${RED}Jumlah worker harus angka positif!${NC}"
-    exit 1
-fi
-
-# --- 4. Pilih mode input ---
-echo -e "${YELLOW}Pilih mode input:${NC}"
-echo "  1) Single (input satu per satu dengan back/exit)"
-echo "  2) Batch (paste semua baris: IP PORT PASSWORD)"
-read -p "Pilihan (1/2): " MODE
-if [[ ! "$MODE" =~ ^[12]$ ]]; then
-    echo -e "${RED}Pilihan tidak valid. Gunakan 1 atau 2.${NC}"
-    exit 1
-fi
-
-# Buat direktori konfigurasi
-mkdir -p /etc/loadbalancer
-WORKER_FILE="/etc/loadbalancer/workers"
-> "$WORKER_FILE"
-
-declare -a WORKER_LIST
-declare -a FAILED_WORKERS
-
-# --- 5. Kumpulkan data worker sesuai mode ---
-if [ "$MODE" = "1" ]; then
-    echo -e "${GREEN}[3/6] Setup akses ke worker (single mode)...${NC}"
-    for ((i=1; i<=WORKER_COUNT; i++)); do
-        echo -e "${YELLOW}--- Worker ke-$i (ketik 'back' untuk ulangi, 'exit' untuk batal) ---${NC}"
-        while true; do
-            IP=$(prompt_with_back_exit "IP address worker" "")
-            if [ $? -eq 1 ]; then continue; fi
-            PORT=$(prompt_with_back_exit "Port SSH worker" "22")
-            if [ $? -eq 1 ]; then continue; fi
-            echo -n "Password root worker: "
-            PASS=$(prompt_password "Password")
-            if [ $? -eq 1 ]; then continue; fi
-            WORKER_LIST+=("$IP:$PORT:$PASS")
-            break
-        done
+# --- 3. Cek worker yang sudah ada ---
+EXISTING_WORKERS=()
+if [ -s "$WORKER_FILE" ]; then
+    mapfile -t EXISTING_WORKERS < "$WORKER_FILE"
+    echo -e "${GREEN}✅ Ditemukan ${#EXISTING_WORKERS[@]} worker terdaftar:${NC}"
+    for w in "${EXISTING_WORKERS[@]}"; do
+        echo "  - $w"
     done
+fi
+
+# --- 4. Tentukan aksi ---
+if [ ${#EXISTING_WORKERS[@]} -eq 0 ]; then
+    echo -e "${YELLOW}Belum ada worker. Silakan tambahkan.${NC}"
+    ACTION="add"
 else
-    echo -e "${GREEN}[3/6] Setup akses ke worker (batch mode)...${NC}"
-    echo -e "${YELLOW}Paste daftar worker (format: IP PORT PASSWORD), satu baris per worker."
-    echo -e "Setelah selesai, tekan ENTER pada baris kosong."
-    echo "Contoh:"
-    echo "  192.168.1.100 22 mypassword123"
-    echo "  192.168.1.101 2222 secret#pass"
-    echo
-    read -p "Tekan Enter untuk mulai memasukkan data..."
-
-    count=0
-    while [ $count -lt $WORKER_COUNT ]; do
-        read -r line
-        # Jika baris kosong, anggap selesai
-        if [ -z "$line" ]; then
-            break
-        fi
-        # Parse baris: IP PORT PASSWORD (spasi sebagai pemisah, password bisa berisi spasi)
-        # Gunakan set untuk split
-        set -- $line
-        if [ $# -lt 3 ]; then
-            echo -e "${RED}Format salah: butuh minimal 3 kolom (IP PORT PASSWORD). Baris ini dilewati.${NC}"
-            continue
-        fi
-        ip="$1"
-        port="$2"
-        # Ambil sisa sebagai password (termasuk spasi dan #)
-        shift 2
-        pass="$*"
-        # Simpan
-        WORKER_LIST+=("$ip:$port:$pass")
-        count=$((count+1))
-        echo -e "${BLUE}  ➔ Ditambahkan: $ip:$port${NC}"
-    done
-
-    if [ $count -lt $WORKER_COUNT ]; then
-        echo -e "${YELLOW}Jumlah worker yang dimasukkan: $count (kurang dari $WORKER_COUNT)${NC}"
-        echo -e "${YELLOW}Lanjutkan dengan $count worker? (y/n):${NC}"
-        read -r confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            echo -e "${RED}Instalasi dibatalkan.${NC}"
-            exit 0
-        fi
-        WORKER_COUNT=$count
-    fi
-fi
-
-# --- 6. Konfirmasi daftar worker ---
-echo -e "${GREEN}=================================================${NC}"
-echo -e "${YELLOW}Daftar worker yang akan disetup:${NC}"
-for entry in "${WORKER_LIST[@]}"; do
-    IFS=':' read -r ip port pass <<< "$entry"
-    echo -e "  - IP: $ip, Port: $port"
-done
-echo -e "${YELLOW}Lanjutkan setup? (y/n):${NC}"
-read -r confirm
-if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-    echo -e "${RED}Instalasi dibatalkan.${NC}"
-    exit 0
-fi
-
-# --- 7. Proses setiap worker (ssh-copy-id) dengan toleransi error ---
-echo -e "${GREEN}[4/6] Menyalin SSH key ke worker (mungkin memakan waktu)...${NC}"
-for entry in "${WORKER_LIST[@]}"; do
-    IFS=':' read -r ip port pass <<< "$entry"
-    echo -e "${BLUE}  ➔ Menyalin key ke $ip:$port...${NC}"
-    if add_worker "$ip" "$port" "$pass"; then
-        # sukses sudah ditambahkan ke file oleh add_worker
-        :
+    echo -e "${YELLOW}Ingin menambah worker baru? (y/n)${NC}"
+    read -r ADD_NEW
+    if [[ "$ADD_NEW" =~ ^[Yy]$ ]]; then
+        ACTION="add"
     else
-        FAILED_WORKERS+=("$ip:$port")
+        ACTION="restart"
     fi
-done
+fi
 
-# --- 8. Buat script `run` dengan failover ---
-echo -e "${GREEN}[5/6] Membuat perintah 'run'...${NC}"
-cat > /usr/local/bin/run <<'EOF'
+# --- 5. Proses tambah worker jika diperlukan ---
+if [ "$ACTION" = "add" ]; then
+    echo -e "${GREEN}[3/7] Tambah Worker Baru${NC}"
+    echo -n "Jumlah worker yang akan ditambahkan: "
+    read -r NEW_COUNT
+    if ! [[ "$NEW_COUNT" =~ ^[0-9]+$ ]] || [ "$NEW_COUNT" -eq 0 ]; then
+        echo -e "${RED}Jumlah harus angka positif.${NC}"
+        exit 1
+    fi
+
+    echo -e "${YELLOW}Pilih mode input:${NC}"
+    echo "  1) Single (input satu per satu)"
+    echo "  2) Batch (paste semua baris: IP PORT PASSWORD)"
+    read -p "Pilihan (1/2): " MODE
+    if [[ ! "$MODE" =~ ^[12]$ ]]; then
+        echo -e "${RED}Pilihan tidak valid.${NC}"
+        exit 1
+    fi
+
+    declare -a NEW_WORKERS
+    if [ "$MODE" = "1" ]; then
+        for ((i=1; i<=NEW_COUNT; i++)); do
+            echo -e "${YELLOW}--- Worker ke-$i ---${NC}"
+            while true; do
+                IP=$(prompt_with_back_exit "IP address" "")
+                [ $? -eq 1 ] && continue
+                PORT=$(prompt_with_back_exit "Port SSH" "22")
+                [ $? -eq 1 ] && continue
+                PASS=$(prompt_password)
+                [ $? -eq 1 ] && continue
+                NEW_WORKERS+=("$IP:$PORT:$PASS")
+                break
+            done
+        done
+    else
+        echo -e "${YELLOW}Paste daftar (format: IP PORT PASSWORD), ENTER kosong untuk selesai.${NC}"
+        echo "Contoh: 192.168.1.100 22 mypass123"
+        read -p "Tekan Enter..."
+        count=0
+        while [ $count -lt $NEW_COUNT ]; do
+            read -r line
+            [ -z "$line" ] && break
+            set -- $line
+            if [ $# -lt 3 ]; then
+                echo -e "${RED}Format salah, lewati.${NC}"
+                continue
+            fi
+            ip="$1"; port="$2"; shift 2; pass="$*"
+            NEW_WORKERS+=("$ip:$port:$pass")
+            count=$((count+1))
+            echo -e "${BLUE}  ➔ Ditambahkan: $ip:$port${NC}"
+        done
+        if [ $count -lt $NEW_COUNT ]; then
+            echo -e "${YELLOW}Hanya $count dari $NEW_COUNT worker dimasukkan. Lanjut? (y/n)${NC}"
+            read -r confirm
+            [[ ! "$confirm" =~ ^[Yy]$ ]] && exit 0
+        fi
+    fi
+
+    # Konfirmasi
+    echo -e "${GREEN}Daftar worker baru:${NC}"
+    for w in "${NEW_WORKERS[@]}"; do
+        IFS=':' read -r ip port pass <<< "$w"
+        echo "  - $ip:$port"
+    done
+    echo -e "${YELLOW}Lanjutkan setup? (y/n)${NC}"
+    read -r confirm
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && exit 0
+
+    # Proses add worker
+    echo -e "${GREEN}[4/7] Menyalin SSH key ke worker...${NC}"
+    for w in "${NEW_WORKERS[@]}"; do
+        IFS=':' read -r ip port pass <<< "$w"
+        echo -e "${BLUE}  ➔ $ip:$port${NC}"
+        if add_worker "$ip" "$port" "$pass"; then
+            # Install dependensi di worker
+            install_deps_worker "$ip" "$port" &
+        fi
+    done
+    wait
+    echo -e "${GREEN}✅ Semua worker baru selesai diproses.${NC}"
+fi
+
+# --- 6. Buat wrapper untuk redirect semua perintah ke worker ---
+echo -e "${GREEN}[5/7] Membuat wrapper...${NC}"
+cat > "$WRAPPER_FILE" <<'EOF'
 #!/bin/bash
-# Perintah: run "command" - menjalankan perintah di worker secara round-robin
-# Failover otomatis jika worker down
+# Wrapper untuk redirect SEMUA perintah (kecuali dasar) ke worker
 
+LOCAL_CMDS="^(pm2|node|npm|yarn|cd|ls|pwd|echo|cat|grep|sed|awk|kill|ps|top|htop|free|df|du|whoami|id|sleep|wait|exit|export|unset|set|source|alias|unalias|type|which|find|xargs|wc|sort|uniq|head|tail|cut|tr|tee|date|cal|clear|history|fg|bg|jobs|ulimit|umask)$"
+
+if [[ "$1" =~ $LOCAL_CMDS ]]; then
+    exec "$@"
+else
+    /usr/local/bin/run "$@"
+fi
+EOF
+chmod +x "$WRAPPER_FILE"
+
+# --- 7. Buat script `run` jika belum ada ---
+if [ ! -f /usr/local/bin/run ]; then
+    echo -e "${GREEN}[6/7] Membuat perintah 'run'...${NC}"
+    cat > /usr/local/bin/run <<'EOF'
+#!/bin/bash
 WORKER_FILE="/etc/loadbalancer/workers"
 INDEX_FILE="/tmp/run_roundrobin_index"
 
-if [ ! -f "$WORKER_FILE" ] || [ ! -s "$WORKER_FILE" ]; then
-    echo "ERROR: Tidak ada worker terdaftar." >&2
-    exit 1
-fi
-
-if [ $# -eq 0 ]; then
-    echo "Usage: run \"perintah dengan argumen\"" >&2
-    exit 1
-fi
+[ ! -f "$WORKER_FILE" ] || [ ! -s "$WORKER_FILE" ] && echo "ERROR: No workers." && exit 1
+[ $# -eq 0 ] && echo "Usage: run \"command\"" && exit 1
 
 mapfile -t WORKERS < "$WORKER_FILE"
 TOTAL=${#WORKERS[@]}
+[ -f "$INDEX_FILE" ] && LAST=$(cat "$INDEX_FILE") || LAST=-1
+NEXT=$(( (LAST + 1) % TOTAL ))
+echo "$NEXT" > "$INDEX_FILE"
 
-# Baca index terakhir
-if [ -f "$INDEX_FILE" ]; then
-    LAST=$(cat "$INDEX_FILE")
-    NEXT=$(( (LAST + 1) % TOTAL ))
-else
-    NEXT=0
-fi
-
-# Coba ke semua worker secara bergiliran sampai berhasil
 for ((attempt=0; attempt<TOTAL; attempt++)); do
     WORKER="${WORKERS[$NEXT]}"
     IP=$(echo "$WORKER" | cut -d':' -f1)
     PORT=$(echo "$WORKER" | cut -d':' -f2)
-    
     if ssh -p "$PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@"$IP" "$@" 2>/dev/null; then
-        echo "$NEXT" > "$INDEX_FILE"
         exit 0
     fi
-    
     NEXT=$(( (NEXT + 1) % TOTAL ))
 done
-
-echo "ERROR: Semua worker down atau tidak bisa diakses." >&2
+echo "ERROR: All workers down." >&2
 exit 1
 EOF
+    chmod +x /usr/local/bin/run
+fi
 
-chmod +x /usr/local/bin/run
-
-# --- 9. Buat script `vt` untuk manajemen ---
-echo -e "${GREEN}[6/6] Membuat perintah 'vt' (manajemen)...${NC}"
-cat > /usr/local/bin/vt <<'EOF'
+# --- 8. Buat script `vt` jika belum ada ---
+if [ ! -f /usr/local/bin/vt ]; then
+    echo -e "${GREEN}[7/7] Membuat perintah 'vt'...${NC}"
+    cat > /usr/local/bin/vt <<'EOF'
 #!/bin/bash
-# Manajemen Worker Load Balancer
-# Subcommands: list, disconnect, add, help
+# vt - Manajemen Worker
 
 WORKER_FILE="/etc/loadbalancer/workers"
 INDEX_FILE="/tmp/run_roundrobin_index"
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
 show_help() {
     cat <<HELP
 ${GREEN}vt - Manajemen Worker Load Balancer${NC}
-
-Penggunaan:
-  ${BLUE}vt list${NC}               - Tampilkan daftar worker dengan status & resource
-  ${BLUE}vt disconnect <ID>${NC}   - Hapus worker berdasarkan ID (nomor urut)
-  ${BLUE}vt add${NC}               - Tambah worker baru (interaktif)
-  ${BLUE}vt help${NC}              - Tampilkan bantuan ini
-
-Contoh:
-  vt list
-  vt disconnect 2
-  vt add
+  ${BLUE}list${NC}       - Tampilkan worker + status
+  ${BLUE}add${NC}        - Tambah worker (mode single/batch)
+  ${BLUE}disconnect ID${NC} - Hapus worker
+  ${BLUE}restart${NC}   - Restart PM2 dengan wrapper (redirect semua proses)
+  ${BLUE}help${NC}       - Bantuan
 HELP
 }
 
-check_worker() {
-    local ip="$1"
-    local port="$2"
-    local output
-    if output=$(ssh -p "$port" -o ConnectTimeout=3 -o StrictHostKeyChecking=no root@"$ip" '
-        echo "OK"
-        free -h | grep -i mem | awk "{print \$2,\$3,\$4}"
-        uptime -p | sed "s/up //"
-        cat /proc/loadavg | awk "{print \$1,\$2,\$3}"
-    ' 2>/dev/null); then
-        IFS=$'\n' read -r status mem_line uptime_line load_line <<< "$output"
-        if [ "$status" = "OK" ]; then
-            echo "ONLINE|$mem_line|$uptime_line|$load_line"
-            return 0
-        fi
-    fi
-    echo "OFFLINE|-|-|-"
-    return 1
-}
-
 cmd_list() {
-    if [ ! -f "$WORKER_FILE" ] || [ ! -s "$WORKER_FILE" ]; then
-        echo -e "${RED}Tidak ada worker terdaftar.${NC}"
-        return 1
-    fi
-    
+    [ ! -s "$WORKER_FILE" ] && echo -e "${RED}Tidak ada worker.${NC}" && return 1
     mapfile -t WORKERS < "$WORKER_FILE"
     echo -e "${GREEN}=== Daftar Worker ===${NC}"
-    printf "${BLUE}%-4s %-20s %-6s %-10s %-15s %-20s %s${NC}\n" "ID" "IP" "Port" "Status" "RAM (total/used/free)" "Uptime" "Load"
-    echo "--------------------------------------------------------------------------------------------------"
-    
+    printf "%-4s %-20s %-6s %-10s %-15s %-20s %s\n" "ID" "IP" "Port" "Status" "RAM" "Uptime" "Load"
     local id=1
-    for worker in "${WORKERS[@]}"; do
-        ip=$(echo "$worker" | cut -d':' -f1)
-        port=$(echo "$worker" | cut -d':' -f2)
-        
-        info=$(check_worker "$ip" "$port")
-        IFS='|' read -r status mem uptime load <<< "$info"
-        
-        if [ "$status" = "ONLINE" ]; then
-            status_color="${GREEN}ONLINE${NC}"
+    for w in "${WORKERS[@]}"; do
+        ip=$(echo "$w" | cut -d':' -f1); port=$(echo "$w" | cut -d':' -f2)
+        info=$(ssh -p "$port" -o ConnectTimeout=3 -o StrictHostKeyChecking=no root@"$ip" '
+            echo "OK"
+            free -h | grep -i mem | awk "{print \$2,\$3,\$4}"
+            uptime -p | sed "s/up //"
+            cat /proc/loadavg | awk "{print \$1,\$2,\$3}"
+        ' 2>/dev/null)
+        if [ $? -eq 0 ]; then
+            IFS=$'\n' read -r status mem uptime load <<< "$info"
+            status="${GREEN}ONLINE${NC}"
         else
-            status_color="${RED}OFFLINE${NC}"
-            mem="-"; uptime="-"; load="-"
+            status="${RED}OFFLINE${NC}"; mem="-"; uptime="-"; load="-"
         fi
-        
-        printf "%-4s %-20s %-6s %-10b %-15s %-20s %s\n" \
-            "$id" "$ip" "$port" "$status_color" "$mem" "$uptime" "$load"
+        printf "%-4s %-20s %-6s %-10b %-15s %-20s %s\n" "$id" "$ip" "$port" "$status" "$mem" "$uptime" "$load"
         ((id++))
     done
 }
 
-cmd_disconnect() {
-    local id="$1"
-    if [ -z "$id" ] || ! [[ "$id" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}ID harus angka positif.${NC}"
-        return 1
-    fi
-    
-    if [ ! -f "$WORKER_FILE" ] || [ ! -s "$WORKER_FILE" ]; then
-        echo -e "${RED}Tidak ada worker terdaftar.${NC}"
-        return 1
-    fi
-    
-    mapfile -t WORKERS < "$WORKER_FILE"
-    if [ "$id" -gt "${#WORKERS[@]}" ] || [ "$id" -lt 1 ]; then
-        echo -e "${RED}ID $id tidak ditemukan.${NC}"
-        return 1
-    fi
-    
-    local new_workers=()
-    local i=1
-    for worker in "${WORKERS[@]}"; do
-        if [ "$i" -ne "$id" ]; then
-            new_workers+=("$worker")
+cmd_add() {
+    echo -e "${YELLOW}Tambah Worker Baru${NC}"
+    echo -n "Mode (1=single, 2=batch): "
+    read -r mode
+    if [ "$mode" = "1" ]; then
+        echo -n "IP: "; read -r ip
+        echo -n "Port (default 22): "; read -r port; [ -z "$port" ] && port=22
+        echo -n "Password: "; read -rs pass; echo
+        if sshpass -p "$pass" ssh-copy-id -o StrictHostKeyChecking=no -p "$port" root@"$ip"; then
+            echo "$ip:$port" >> "$WORKER_FILE"
+            echo -e "${GREEN}Worker added.${NC}"
+        else
+            echo -e "${RED}Gagal.${NC}"
         fi
-        ((i++))
-    done
-    
-    printf "%s\n" "${new_workers[@]}" > "$WORKER_FILE"
-    rm -f "$INDEX_FILE"
-    echo -e "${GREEN}Worker ID $id berhasil dihapus.${NC}"
+    elif [ "$mode" = "2" ]; then
+        echo "Paste list (IP PORT PASSWORD), ENTER kosong selesai:"
+        while read -r line; do
+            [ -z "$line" ] && break
+            set -- $line
+            [ $# -lt 3 ] && echo "Format salah, lewati." && continue
+            ip="$1"; port="$2"; shift 2; pass="$*"
+            if sshpass -p "$pass" ssh-copy-id -o StrictHostKeyChecking=no -p "$port" root@"$ip"; then
+                echo "$ip:$port" >> "$WORKER_FILE"
+                echo -e "${GREEN}Added $ip:$port${NC}"
+            else
+                echo -e "${RED}Failed $ip:$port${NC}"
+            fi
+        done
+    else
+        echo -e "${RED}Mode salah.${NC}"
+    fi
 }
 
-cmd_add() {
-    echo -e "${YELLOW}--- Tambah Worker Baru ---${NC}"
-    echo -n "IP address worker: "
-    read -r ip
-    if [ -z "$ip" ]; then echo -e "${RED}IP tidak boleh kosong.${NC}"; return 1; fi
-    
-    echo -n "Port SSH worker (default 22): "
-    read -r port
-    if [ -z "$port" ]; then port=22; fi
-    
-    echo -n "Password root worker: "
-    read -rs pass
-    echo
-    if [ -z "$pass" ]; then echo -e "${RED}Password tidak boleh kosong.${NC}"; return 1; fi
-    
-    if ! command -v sshpass &> /dev/null; then
-        apt-get update -qq && apt-get install sshpass -y -qq
+cmd_disconnect() {
+    local id="$1"
+    [ -z "$id" ] && echo "Usage: vt disconnect ID" && return 1
+    mapfile -t WORKERS < "$WORKER_FILE"
+    if [ "$id" -gt "${#WORKERS[@]}" ] || [ "$id" -lt 1 ]; then
+        echo -e "${RED}ID tidak ditemukan.${NC}"; return 1
     fi
-    
-    echo -e "${BLUE}Menyalin key ke $ip:$port...${NC}"
-    if sshpass -p "$pass" ssh-copy-id -o StrictHostKeyChecking=no -p "$port" root@"$ip"; then
-        echo "$ip:$port" >> "$WORKER_FILE"
-        echo -e "${GREEN}Worker $ip berhasil ditambahkan.${NC}"
+    local new=()
+    local i=1
+    for w in "${WORKERS[@]}"; do
+        [ "$i" -ne "$id" ] && new+=("$w")
+        ((i++))
+    done
+    printf "%s\n" "${new[@]}" > "$WORKER_FILE"
+    rm -f "$INDEX_FILE"
+    echo -e "${GREEN}Worker $id dihapus.${NC}"
+}
+
+cmd_restart() {
+    echo -e "${YELLOW}Restart PM2 dengan wrapper...${NC}"
+    # Set environment SHELL di .bashrc
+    if ! grep -q "export SHELL=/usr/local/bin/run-wrapper" ~/.bashrc; then
+        echo 'export SHELL=/usr/local/bin/run-wrapper' >> ~/.bashrc
+    fi
+    export SHELL=/usr/local/bin/run-wrapper
+    # Restart semua proses PM2
+    if command -v pm2 &> /dev/null; then
+        pm2 restart all --update-env 2>/dev/null || pm2 restart all
+        echo -e "${GREEN}✅ PM2 restart selesai. Semua proses sekarang pakai wrapper.${NC}"
+        echo -e "${YELLOW}Catatan: Perintah berat akan otomatis ke worker.${NC}"
     else
-        echo -e "${RED}Gagal menyalin key ke $ip. Periksa koneksi dan password.${NC}"
-        return 1
+        echo -e "${RED}PM2 tidak terinstall.${NC}"
     fi
 }
 
 case "$1" in
     list) cmd_list ;;
-    disconnect) cmd_disconnect "$2" ;;
     add) cmd_add ;;
+    disconnect) cmd_disconnect "$2" ;;
+    restart) cmd_restart ;;
     help|--help|-h|"") show_help ;;
-    *) echo -e "${RED}Perintah tidak dikenal: $1${NC}"; show_help; exit 1 ;;
+    *) echo -e "${RED}Perintah tidak dikenal.${NC}"; show_help ;;
 esac
 EOF
+    chmod +x /usr/local/bin/vt
+fi
 
-chmod +x /usr/local/bin/vt
-
-# --- 10. Tambahkan alias (tanpa sudo) ---
-echo -e "${GREEN}Menambahkan alias ke .bashrc...${NC}"
-for cmd in run vt; do
-    if ! grep -q "alias $cmd=" ~/.bashrc 2>/dev/null; then
-        echo "alias $cmd='/usr/local/bin/$cmd'" >> ~/.bashrc
+# --- 9. Restart PM2 jika diminta ---
+if [ "$ACTION" = "restart" ] || [ ${#EXISTING_WORKERS[@]} -gt 0 ]; then
+    echo -e "${YELLOW}Apakah Anda ingin merestart semua proses PM2 dengan wrapper? (y/n)${NC}"
+    read -r RESTART_PM2
+    if [[ "$RESTART_PM2" =~ ^[Yy]$ ]]; then
+        vt restart
+    else
+        echo -e "${YELLOW}Anda bisa menjalankan 'vt restart' nanti.${NC}"
     fi
-done
-
-# --- 11. Selesai ---
-echo -e "${GREEN}=================================================${NC}"
-echo -e "${GREEN}✅ INSTALASI SELESAI!${NC}"
-echo -e "Perintah tersedia:"
-echo -e "  ${BLUE}run \"perintah\"${NC}  - jalankan perintah di worker (round-robin, failover)"
-echo -e "  ${BLUE}vt list${NC}         - lihat daftar worker & status"
-echo -e "  ${BLUE}vt disconnect ID${NC} - hapus worker berdasarkan ID"
-echo -e "  ${BLUE}vt add${NC}          - tambah worker baru"
-echo -e "  ${BLUE}vt help${NC}         - bantuan"
-echo -e "Worker terdaftar:"
-if [ -s "$WORKER_FILE" ]; then
-    cat "$WORKER_FILE" | while read -r line; do
-        echo "  - $line"
-    done
 else
-    echo "  (tidak ada worker yang berhasil terdaftar)"
+    echo -e "${YELLOW}Apakah ingin langsung restart PM2 sekarang? (y/n)${NC}"
+    read -r RESTART_PM2
+    if [[ "$RESTART_PM2" =~ ^[Yy]$ ]]; then
+        vt restart
+    fi
 fi
-if [ ${#FAILED_WORKERS[@]} -gt 0 ]; then
-    echo -e "${RED}Worker gagal (password/salah/koneksi):${NC}"
-    for fw in "${FAILED_WORKERS[@]}"; do
-        echo "  - $fw"
-    done
-fi
-echo -e "${GREEN}=================================================${NC}"
+
+# --- 10. Selesai ---
+echo -e "${GREEN}============================================================${NC}"
+echo -e "${GREEN}✅ SEMUA SELESAI!${NC}"
+echo -e "Perintah tersedia:"
+echo -e "  ${BLUE}run \"perintah\"${NC}    - jalankan perintah di worker"
+echo -e "  ${BLUE}vt list${NC}           - lihat worker + status"
+echo -e "  ${BLUE}vt add${NC}            - tambah worker (mode single/batch)"
+echo -e "  ${BLUE}vt disconnect ID${NC}  - hapus worker"
+echo -e "  ${BLUE}vt restart${NC}        - restart PM2 dengan wrapper"
+echo -e "Worker terdaftar:"
+[ -s "$WORKER_FILE" ] && cat "$WORKER_FILE" | while read -r line; do echo "  - $line"; done || echo "  (tidak ada)"
+echo -e "${GREEN}============================================================${NC}"
 echo -e "${YELLOW}Catatan:${NC}"
-echo "  • Untuk memuat alias, jalankan: source ~/.bashrc"
-echo "  • run akan otomatis coba worker lain jika satu down."
-echo "  • vt list menampilkan resource (RAM, uptime, load)."
+echo "  • Semua perintah berat dari bot akan otomatis dijalankan di worker."
+echo "  • Untuk mengaktifkan perubahan di shell saat ini, jalankan: source ~/.bashrc"
+echo "  • Jika ada worker baru, jalankan 'vt add' lalu 'vt restart' untuk aktifkan."
