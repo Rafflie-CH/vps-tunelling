@@ -15,9 +15,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${GREEN}=================================================${NC}"
-echo -e "${GREEN}  Load Balancer Perintah (Round-Robin via SSH)  ${NC}"
-echo -e "${GREEN}=================================================${NC}"
+echo -e "${GREEN}==============================================================${NC}"
+echo -e "${GREEN}  Load Balancer Perintah (Round-Robin via SSH) SUPPORT MULTI  ${NC}"
+echo -e "${GREEN}==============================================================${NC}"
 
 # --- Fungsi untuk prompt dengan back & exit (single mode) ---
 prompt_with_back_exit() {
