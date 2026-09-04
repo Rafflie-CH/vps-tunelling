@@ -153,8 +153,8 @@ else
     echo -e "${YELLOW}Paste daftar worker (format: IP PORT PASSWORD), satu baris per worker."
     echo -e "Ketik ${BLUE}DONE${YELLOW} pada baris kosong setelah selesai.${NC}"
     echo "Contoh:"
-    echo "  66.33.22.220 42388 #Sungaitabuk1"
-    echo "  66.33.22.220 28555 #Sungaitabuk1"
+    echo "  66.33.xx.xxx 42xx xxxxxx"
+    echo "  66.xx.22.2xx xx55 xxxxxx"
     echo
     read -p "Tekan Enter untuk mulai memasukkan data..."
 
