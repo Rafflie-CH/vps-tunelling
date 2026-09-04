@@ -15,9 +15,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${GREEN}==============================================================${NC}"
-echo -e "${GREEN}  Load Balancer Perintah (Round-Robin via SSH) SUPPORT MULTI  ${NC}"
-echo -e "${GREEN}==============================================================${NC}"
+echo -e "${GREEN}=================================================${NC}"
+echo -e "${GREEN}  Load Balancer Perintah (Round-Robin via SSH)  ${NC}"
+echo -e "${GREEN}=================================================${NC}"
 
 # --- Fungsi untuk prompt dengan back & exit (single mode) ---
 prompt_with_back_exit() {
@@ -151,45 +151,38 @@ if [ "$MODE" = "1" ]; then
 else
     echo -e "${GREEN}[3/6] Setup akses ke worker (batch mode)...${NC}"
     echo -e "${YELLOW}Paste daftar worker (format: IP PORT PASSWORD), satu baris per worker."
-    echo -e "Ketik ${BLUE}DONE${YELLOW} pada baris kosong setelah selesai.${NC}"
+    echo -e "Setelah selesai, tekan ENTER pada baris kosong."
     echo "Contoh:"
-    echo "  66.33.xx.xxx 42xx xxxxxx"
-    echo "  66.xx.22.2xx xx55 xxxxxx"
+    echo "  192.168.1.100 22 mypassword123"
+    echo "  192.168.1.101 2222 secret#pass"
     echo
     read -p "Tekan Enter untuk mulai memasukkan data..."
 
-    local count=0
+    count=0
     while [ $count -lt $WORKER_COUNT ]; do
         read -r line
+        # Jika baris kosong, anggap selesai
         if [ -z "$line" ]; then
-            # Jika line kosong dan count<WORKER_COUNT, tanya apakah selesai?
-            if [ $count -eq 0 ]; then
-                echo -e "${RED}Data tidak boleh kosong.${NC}"
-                continue
-            fi
-            read -p "Masih ada data? (y/n): " more
-            if [[ ! "$more" =~ ^[Yy]$ ]]; then
-                break
-            else
-                continue
-            fi
+            break
         fi
-        # Parse line: IP PORT PASSWORD (bisa pakai # sebagai password)
-        # Format: IP PORT PASSWORD (spasi sebagai pemisah)
+        # Parse baris: IP PORT PASSWORD (spasi sebagai pemisah, password bisa berisi spasi)
+        # Gunakan set untuk split
         set -- $line
         if [ $# -lt 3 ]; then
-            echo -e "${RED}Format salah: butuh 3 kolom (IP PORT PASSWORD)${NC}"
+            echo -e "${RED}Format salah: butuh minimal 3 kolom (IP PORT PASSWORD). Baris ini dilewati.${NC}"
             continue
         fi
-        local ip="$1"
-        local port="$2"
-        # Ambil sisa sebagai password (termasuk # jika ada)
+        ip="$1"
+        port="$2"
+        # Ambil sisa sebagai password (termasuk spasi dan #)
         shift 2
-        local pass="$*"
+        pass="$*"
+        # Simpan
         WORKER_LIST+=("$ip:$port:$pass")
         count=$((count+1))
         echo -e "${BLUE}  ➔ Ditambahkan: $ip:$port${NC}"
     done
+
     if [ $count -lt $WORKER_COUNT ]; then
         echo -e "${YELLOW}Jumlah worker yang dimasukkan: $count (kurang dari $WORKER_COUNT)${NC}"
         echo -e "${YELLOW}Lanjutkan dengan $count worker? (y/n):${NC}"
