@@ -84,7 +84,6 @@ install_deps_worker() {
     ssh -p "$port" -o StrictHostKeyChecking=no root@"$ip" '
         apt-get update -qq
         apt-get install -y -qq python3 python3-pip nodejs npm ffmpeg imagemagick curl wget git
-        # Tambahkan yang lain sesuai kebutuhan
         echo "Dependencies installed"
     ' 2>/dev/null && echo -e "${GREEN}  ✓ Dependencies installed di $ip${NC}" || echo -e "${RED}  ✗ Gagal install di $ip${NC}"
 }
@@ -198,7 +197,6 @@ if [ "$ACTION" = "add" ]; then
         IFS=':' read -r ip port pass <<< "$w"
         echo -e "${BLUE}  ➔ $ip:$port${NC}"
         if add_worker "$ip" "$port" "$pass"; then
-            # Install dependensi di worker
             install_deps_worker "$ip" "$port" &
         fi
     done
@@ -254,7 +252,7 @@ EOF
     chmod +x /usr/local/bin/run
 fi
 
-# --- 8. Buat script `vt` jika belum ada ---
+# --- 8. Buat script `vt` untuk manajemen ---
 if [ ! -f /usr/local/bin/vt ]; then
     echo -e "${GREEN}[7/7] Membuat perintah 'vt'...${NC}"
     cat > /usr/local/bin/vt <<'EOF'
@@ -354,12 +352,10 @@ cmd_disconnect() {
 
 cmd_restart() {
     echo -e "${YELLOW}Restart PM2 dengan wrapper...${NC}"
-    # Set environment SHELL di .bashrc
     if ! grep -q "export SHELL=/usr/local/bin/run-wrapper" ~/.bashrc; then
         echo 'export SHELL=/usr/local/bin/run-wrapper' >> ~/.bashrc
     fi
     export SHELL=/usr/local/bin/run-wrapper
-    # Restart semua proses PM2
     if command -v pm2 &> /dev/null; then
         pm2 restart all --update-env 2>/dev/null || pm2 restart all
         echo -e "${GREEN}✅ PM2 restart selesai. Semua proses sekarang pakai wrapper.${NC}"
@@ -386,7 +382,7 @@ if [ "$ACTION" = "restart" ] || [ ${#EXISTING_WORKERS[@]} -gt 0 ]; then
     echo -e "${YELLOW}Apakah Anda ingin merestart semua proses PM2 dengan wrapper? (y/n)${NC}"
     read -r RESTART_PM2
     if [[ "$RESTART_PM2" =~ ^[Yy]$ ]]; then
-        vt restart
+        /usr/local/bin/vt restart
     else
         echo -e "${YELLOW}Anda bisa menjalankan 'vt restart' nanti.${NC}"
     fi
@@ -394,7 +390,7 @@ else
     echo -e "${YELLOW}Apakah ingin langsung restart PM2 sekarang? (y/n)${NC}"
     read -r RESTART_PM2
     if [[ "$RESTART_PM2" =~ ^[Yy]$ ]]; then
-        vt restart
+        /usr/local/bin/vt restart
     fi
 fi
 
