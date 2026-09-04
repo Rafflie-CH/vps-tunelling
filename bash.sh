@@ -2,7 +2,7 @@
 # =========================================================
 # Load Balancer Proses - Eksekusi Perintah ke Worker
 # Tanpa login pihak ketiga, hanya SSH + key
-# Fitur: back, exit, konfirmasi, vt management
+# Support environment tanpa sudo & systemd
 # =========================================================
 
 set -e
@@ -73,10 +73,10 @@ prompt_password() {
     done
 }
 
-# --- 1. Install sshpass ---
+# --- 1. Install sshpass (tanpa sudo) ---
 echo -e "${GREEN}[1/6] Install sshpass...${NC}"
 if ! command -v sshpass &> /dev/null; then
-    sudo apt update -qq && sudo apt install sshpass -y -qq
+    apt update -qq && apt install sshpass -y -qq
 fi
 
 # --- 2. Generate SSH key ---
@@ -93,45 +93,41 @@ if ! [[ "$WORKER_COUNT" =~ ^[0-9]+$ ]] || [ "$WORKER_COUNT" -eq 0 ]; then
     exit 1
 fi
 
-# Buat direktori konfigurasi
-sudo mkdir -p /etc/loadbalancer
+# Buat direktori konfigurasi (tanpa sudo)
+mkdir -p /etc/loadbalancer
 WORKER_FILE="/etc/loadbalancer/workers"
 > "$WORKER_FILE"
 
 # --- 4. Kumpulkan data worker ---
 echo -e "${GREEN}[3/6] Setup akses ke worker (ssh-copy-id)...${NC}"
-declare -a WORKER_LIST  # untuk menyimpan sementara
+declare -a WORKER_LIST
 
 for ((i=1; i<=WORKER_COUNT; i++)); do
     echo -e "${YELLOW}--- Worker ke-$i (ketik 'back' untuk ulangi, 'exit' untuk batal) ---${NC}"
     
     while true; do
-        # IP
         IP=$(prompt_with_back_exit "IP address worker" "")
         if [ $? -eq 1 ]; then
-            continue  # back, ulangi worker ini dari awal
+            continue
         fi
         
-        # Port
         PORT=$(prompt_with_back_exit "Port SSH worker" "22")
         if [ $? -eq 1 ]; then
             continue
         fi
         
-        # Password
         echo -n "Password root worker: "
         PASS=$(prompt_password "Password")
         if [ $? -eq 1 ]; then
             continue
         fi
         
-        # Simpan sementara
         WORKER_LIST+=("$IP:$PORT:$PASS")
         break
     done
 done
 
-# --- 5. Tampilkan konfirmasi ---
+# --- 5. Konfirmasi ---
 echo -e "${GREEN}=================================================${NC}"
 echo -e "${YELLOW}Daftar worker yang akan disetup:${NC}"
 for entry in "${WORKER_LIST[@]}"; do
@@ -157,11 +153,11 @@ for entry in "${WORKER_LIST[@]}"; do
 done
 
 # --- 7. Buat script `run` dengan failover ---
-echo -e "${GREEN}[5/6] Membuat perintah 'run' (dengan failover)...${NC}"
-sudo tee /usr/local/bin/run > /dev/null <<'EOF'
+echo -e "${GREEN}[5/6] Membuat perintah 'run'...${NC}"
+cat > /usr/local/bin/run <<'EOF'
 #!/bin/bash
 # Perintah: run "command" - menjalankan perintah di worker secara round-robin
-# Jika satu worker down, otomatis coba worker lain
+# Failover otomatis jika worker down
 
 WORKER_FILE="/etc/loadbalancer/workers"
 INDEX_FILE="/tmp/run_roundrobin_index"
@@ -193,14 +189,11 @@ for ((attempt=0; attempt<TOTAL; attempt++)); do
     IP=$(echo "$WORKER" | cut -d':' -f1)
     PORT=$(echo "$WORKER" | cut -d':' -f2)
     
-    # Eksekusi perintah via SSH
     if ssh -p "$PORT" -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@"$IP" "$@" 2>/dev/null; then
-        # Sukses, simpan index untuk next
         echo "$NEXT" > "$INDEX_FILE"
         exit 0
     fi
     
-    # Gagal, coba worker berikutnya
     NEXT=$(( (NEXT + 1) % TOTAL ))
 done
 
@@ -208,11 +201,11 @@ echo "ERROR: Semua worker down atau tidak bisa diakses." >&2
 exit 1
 EOF
 
-sudo chmod +x /usr/local/bin/run
+chmod +x /usr/local/bin/run
 
 # --- 8. Buat script `vt` untuk manajemen ---
-echo -e "${GREEN}[6/6] Membuat perintah 'vt' (manajemen worker)...${NC}"
-sudo tee /usr/local/bin/vt > /dev/null <<'EOF'
+echo -e "${GREEN}[6/6] Membuat perintah 'vt' (manajemen)...${NC}"
+cat > /usr/local/bin/vt <<'EOF'
 #!/bin/bash
 # Manajemen Worker Load Balancer
 # Subcommands: list, disconnect, add, help
@@ -220,7 +213,6 @@ sudo tee /usr/local/bin/vt > /dev/null <<'EOF'
 WORKER_FILE="/etc/loadbalancer/workers"
 INDEX_FILE="/tmp/run_roundrobin_index"
 
-# Warna
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -244,21 +236,16 @@ Contoh:
 HELP
 }
 
-# Fungsi untuk mengecek status worker dan ambil info resource
 check_worker() {
     local ip="$1"
     local port="$2"
-    local timeout=3
-    
-    # Cek koneksi SSH dan ambil info
     local output
-    if output=$(ssh -p "$port" -o ConnectTimeout=$timeout -o StrictHostKeyChecking=no root@"$ip" '
+    if output=$(ssh -p "$port" -o ConnectTimeout=3 -o StrictHostKeyChecking=no root@"$ip" '
         echo "OK"
         free -h | grep -i mem | awk "{print \$2,\$3,\$4}"
         uptime -p | sed "s/up //"
         cat /proc/loadavg | awk "{print \$1,\$2,\$3}"
     ' 2>/dev/null); then
-        # Parse output
         IFS=$'\n' read -r status mem_line uptime_line load_line <<< "$output"
         if [ "$status" = "OK" ]; then
             echo "ONLINE|$mem_line|$uptime_line|$load_line"
@@ -285,7 +272,6 @@ cmd_list() {
         ip=$(echo "$worker" | cut -d':' -f1)
         port=$(echo "$worker" | cut -d':' -f2)
         
-        # Cek status
         info=$(check_worker "$ip" "$port")
         IFS='|' read -r status mem uptime load <<< "$info"
         
@@ -320,7 +306,6 @@ cmd_disconnect() {
         return 1
     fi
     
-    # Hapus baris ke-id
     local new_workers=()
     local i=1
     for worker in "${WORKERS[@]}"; do
@@ -330,12 +315,8 @@ cmd_disconnect() {
         ((i++))
     done
     
-    # Tulis ulang file
-    printf "%s\n" "${new_workers[@]}" | sudo tee "$WORKER_FILE" > /dev/null
-    
-    # Reset index file agar tidak bentrok
-    sudo rm -f "$INDEX_FILE"
-    
+    printf "%s\n" "${new_workers[@]}" > "$WORKER_FILE"
+    rm -f "$INDEX_FILE"
     echo -e "${GREEN}Worker ID $id berhasil dihapus.${NC}"
 }
 
@@ -354,15 +335,13 @@ cmd_add() {
     echo
     if [ -z "$pass" ]; then echo -e "${RED}Password tidak boleh kosong.${NC}"; return 1; fi
     
-    # Pastikan sshpass terinstall
     if ! command -v sshpass &> /dev/null; then
-        sudo apt update -qq && sudo apt install sshpass -y -qq
+        apt update -qq && apt install sshpass -y -qq
     fi
     
-    # Copy SSH key
     echo -e "${BLUE}Menyalin key ke $ip:$port...${NC}"
     if sshpass -p "$pass" ssh-copy-id -o StrictHostKeyChecking=no -p "$port" root@"$ip"; then
-        echo "$ip:$port" | sudo tee -a "$WORKER_FILE" > /dev/null
+        echo "$ip:$port" >> "$WORKER_FILE"
         echo -e "${GREEN}Worker $ip berhasil ditambahkan.${NC}"
     else
         echo -e "${RED}Gagal menyalin key ke $ip. Periksa koneksi dan password.${NC}"
@@ -370,31 +349,18 @@ cmd_add() {
     fi
 }
 
-# --- Main ---
 case "$1" in
-    list)
-        cmd_list
-        ;;
-    disconnect)
-        cmd_disconnect "$2"
-        ;;
-    add)
-        cmd_add
-        ;;
-    help|--help|-h|"")
-        show_help
-        ;;
-    *)
-        echo -e "${RED}Perintah tidak dikenal: $1${NC}"
-        show_help
-        exit 1
-        ;;
+    list) cmd_list ;;
+    disconnect) cmd_disconnect "$2" ;;
+    add) cmd_add ;;
+    help|--help|-h|"") show_help ;;
+    *) echo -e "${RED}Perintah tidak dikenal: $1${NC}"; show_help; exit 1 ;;
 esac
 EOF
 
-sudo chmod +x /usr/local/bin/vt
+chmod +x /usr/local/bin/vt
 
-# --- 9. Tambahkan alias ke .bashrc ---
+# --- 9. Tambahkan alias (tanpa sudo) ---
 echo -e "${GREEN}Menambahkan alias ke .bashrc...${NC}"
 for cmd in run vt; do
     if ! grep -q "alias $cmd=" ~/.bashrc 2>/dev/null; then
@@ -406,7 +372,7 @@ done
 echo -e "${GREEN}=================================================${NC}"
 echo -e "${GREEN}✅ INSTALASI SELESAI!${NC}"
 echo -e "Perintah tersedia:"
-echo -e "  ${BLUE}run \"perintah\"${NC}  - jalankan perintah di worker (round-robin, failover otomatis)"
+echo -e "  ${BLUE}run \"perintah\"${NC}  - jalankan perintah di worker (round-robin, failover)"
 echo -e "  ${BLUE}vt list${NC}         - lihat daftar worker & status"
 echo -e "  ${BLUE}vt disconnect ID${NC} - hapus worker berdasarkan ID"
 echo -e "  ${BLUE}vt add${NC}          - tambah worker baru"
@@ -419,4 +385,4 @@ echo -e "${GREEN}=================================================${NC}"
 echo -e "${YELLOW}Catatan:${NC}"
 echo "  • Untuk memuat alias, jalankan: source ~/.bashrc"
 echo "  • run akan otomatis coba worker lain jika satu down."
-echo "  • vt list menampilkan resource (RAM, uptime, load) untuk worker online."
+echo "  • vt list menampilkan resource (RAM, uptime, load)."
