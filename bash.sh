@@ -37,7 +37,7 @@ prompt_with_back_exit() {
                 exit 0
                 ;;
             back)
-                return 1  # sinyal back
+                return 1
                 ;;
             *)
                 echo "$input"
@@ -76,7 +76,7 @@ prompt_password() {
 # --- 1. Install sshpass (tanpa sudo) ---
 echo -e "${GREEN}[1/6] Install sshpass...${NC}"
 if ! command -v sshpass &> /dev/null; then
-    apt update -qq && apt install sshpass -y -qq
+    apt-get update -qq && apt-get install sshpass -y -qq
 fi
 
 # --- 2. Generate SSH key ---
@@ -336,7 +336,7 @@ cmd_add() {
     if [ -z "$pass" ]; then echo -e "${RED}Password tidak boleh kosong.${NC}"; return 1; fi
     
     if ! command -v sshpass &> /dev/null; then
-        apt update -qq && apt install sshpass -y -qq
+        apt-get update -qq && apt-get install sshpass -y -qq
     fi
     
     echo -e "${BLUE}Menyalin key ke $ip:$port...${NC}"
