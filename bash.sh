@@ -14,9 +14,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${GREEN}============================================================${NC}"
-echo -e "${GREEN}     LOAD BALANCER PINTAR - Auto Redirect ke Worker         ${NC}"
-echo -e "${GREEN}============================================================${NC}"
+echo -e "${GREEN}==================================================================${NC}"
+echo -e "${GREEN}     LOAD BALANCER PINTAR - Auto Redirect ke Semua Worker         ${NC}"
+echo -e "${GREEN}==================================================================${NC}"
 
 # --- Konfigurasi ---
 WORKER_FILE="/etc/loadbalancer/workers"
