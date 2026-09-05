@@ -1,11 +1,8 @@
 #!/bin/bash
 # ================================================================
 # LOAD BALANCER PINTAR - Auto Redirect Semua Proses ke Worker
-# Tanpa ubah kode, support PM2, auto install dependensi worker
+# Versi: 2.0 (Update otomatis)
 # ================================================================
-
-set -e
-trap 'echo -e "\n❌ Error fatal. Script berhenti."; exit 1' ERR
 
 # Warna
 RED='\033[0;31m'
@@ -14,19 +11,30 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${GREEN}==================================================================${NC}"
-echo -e "${GREEN}     LOAD BALANCER PINTAR - Auto Redirect ke Semua Worker         ${NC}"
-echo -e "${GREEN}==================================================================${NC}"
-
-# --- Konfigurasi ---
+# --- Versi & lokasi ---
+VERSION="2.0"
+VERSION_FILE="/etc/loadbalancer/version"
 WORKER_FILE="/etc/loadbalancer/workers"
 INDEX_FILE="/tmp/run_roundrobin_index"
 WRAPPER_FILE="/usr/local/bin/run-wrapper"
+VT_FILE="/usr/local/bin/vt"
+RUN_FILE="/usr/local/bin/run"
 
 mkdir -p /etc/loadbalancer
 touch "$WORKER_FILE"
 
-# --- Fungsi untuk prompt dengan back & exit ---
+# --- Cek versi lama dan update otomatis ---
+if [ -f "$VERSION_FILE" ]; then
+    OLD_VER=$(cat "$VERSION_FILE" 2>/dev/null || echo "0")
+    if [ "$OLD_VER" != "$VERSION" ]; then
+        echo -e "${YELLOW}⚠️  Versi lama ($OLD_VER) terdeteksi. Mengupdate ke versi $VERSION...${NC}"
+        # Hapus file-file lama yang perlu diganti
+        rm -f "$VT_FILE" "$RUN_FILE" "$WRAPPER_FILE"
+    fi
+fi
+echo "$VERSION" > "$VERSION_FILE"
+
+# --- Fungsi prompt dengan e/b untuk exit/back ---
 prompt_with_back_exit() {
     local prompt_msg="$1"
     local default_val="$2"
@@ -39,8 +47,8 @@ prompt_with_back_exit() {
             read -p "$prompt_msg: " input
         fi
         case "$input" in
-            exit) echo -e "${RED}Dibatalkan.${NC}"; exit 0 ;;
-            back) return 1 ;;
+            e|exit) echo -e "${RED}Dibatalkan.${NC}"; exit 0 ;;
+            b|back) return 1 ;;
             *) echo "$input"; return 0 ;;
         esac
     done
@@ -53,8 +61,8 @@ prompt_password() {
         echo
         [ -z "$input" ] && echo -e "${RED}Password tidak boleh kosong.${NC}" && continue
         case "$input" in
-            exit) echo -e "${RED}Dibatalkan.${NC}"; exit 0 ;;
-            back) return 1 ;;
+            e|exit) echo -e "${RED}Dibatalkan.${NC}"; exit 0 ;;
+            b|back) return 1 ;;
             *) echo "$input"; return 0 ;;
         esac
     done
@@ -77,7 +85,6 @@ add_worker() {
     return 1
 }
 
-# --- Fungsi install dependensi di worker ---
 install_deps_worker() {
     local ip="$1" port="$2"
     echo -e "${BLUE}  ➔ Install dependensi di $ip:$port...${NC}"
@@ -87,6 +94,11 @@ install_deps_worker() {
         echo "Dependencies installed"
     ' 2>/dev/null && echo -e "${GREEN}  ✓ Dependencies installed di $ip${NC}" || echo -e "${RED}  ✗ Gagal install di $ip${NC}"
 }
+
+echo -e "${GREEN}============================================================${NC}"
+echo -e "${GREEN}     LOAD BALANCER PINTAR - Auto Redirect ke Worker         ${NC}"
+echo -e "${GREEN}                 Versi $VERSION${NC}"
+echo -e "${GREEN}============================================================${NC}"
 
 # --- 1. Install sshpass di utama ---
 echo -e "${GREEN}[1/7] Install sshpass...${NC}"
@@ -137,14 +149,14 @@ if [ "$ACTION" = "add" ]; then
     echo "  2) Batch (paste semua baris: IP PORT PASSWORD)"
     read -p "Pilihan (1/2): " MODE
     if [[ ! "$MODE" =~ ^[12]$ ]]; then
-        echo -e "${RED}Pilihan tidak valid.${NC}"
+        echo -e "${RED}Pilihan tidak valid. Gunakan 1 atau 2.${NC}"
         exit 1
     fi
 
     declare -a NEW_WORKERS
     if [ "$MODE" = "1" ]; then
         for ((i=1; i<=NEW_COUNT; i++)); do
-            echo -e "${YELLOW}--- Worker ke-$i ---${NC}"
+            echo -e "${YELLOW}--- Worker ke-$i (e=exit, b=back) ---${NC}"
             while true; do
                 IP=$(prompt_with_back_exit "IP address" "")
                 [ $? -eq 1 ] && continue
@@ -204,14 +216,12 @@ if [ "$ACTION" = "add" ]; then
     echo -e "${GREEN}✅ Semua worker baru selesai diproses.${NC}"
 fi
 
-# --- 6. Buat wrapper untuk redirect semua perintah ke worker ---
+# --- 6. Buat wrapper ---
 echo -e "${GREEN}[5/7] Membuat wrapper...${NC}"
 cat > "$WRAPPER_FILE" <<'EOF'
 #!/bin/bash
 # Wrapper untuk redirect SEMUA perintah (kecuali dasar) ke worker
-
 LOCAL_CMDS="^(pm2|node|npm|yarn|cd|ls|pwd|echo|cat|grep|sed|awk|kill|ps|top|htop|free|df|du|whoami|id|sleep|wait|exit|export|unset|set|source|alias|unalias|type|which|find|xargs|wc|sort|uniq|head|tail|cut|tr|tee|date|cal|clear|history|fg|bg|jobs|ulimit|umask)$"
-
 if [[ "$1" =~ $LOCAL_CMDS ]]; then
     exec "$@"
 else
@@ -220,23 +230,19 @@ fi
 EOF
 chmod +x "$WRAPPER_FILE"
 
-# --- 7. Buat script `run` jika belum ada ---
-if [ ! -f /usr/local/bin/run ]; then
-    echo -e "${GREEN}[6/7] Membuat perintah 'run'...${NC}"
-    cat > /usr/local/bin/run <<'EOF'
+# --- 7. Buat script `run` ---
+echo -e "${GREEN}[6/7] Membuat perintah 'run'...${NC}"
+cat > "$RUN_FILE" <<'EOF'
 #!/bin/bash
 WORKER_FILE="/etc/loadbalancer/workers"
 INDEX_FILE="/tmp/run_roundrobin_index"
-
 [ ! -f "$WORKER_FILE" ] || [ ! -s "$WORKER_FILE" ] && echo "ERROR: No workers." && exit 1
 [ $# -eq 0 ] && echo "Usage: run \"command\"" && exit 1
-
 mapfile -t WORKERS < "$WORKER_FILE"
 TOTAL=${#WORKERS[@]}
 [ -f "$INDEX_FILE" ] && LAST=$(cat "$INDEX_FILE") || LAST=-1
 NEXT=$(( (LAST + 1) % TOTAL ))
 echo "$NEXT" > "$INDEX_FILE"
-
 for ((attempt=0; attempt<TOTAL; attempt++)); do
     WORKER="${WORKERS[$NEXT]}"
     IP=$(echo "$WORKER" | cut -d':' -f1)
@@ -249,13 +255,11 @@ done
 echo "ERROR: All workers down." >&2
 exit 1
 EOF
-    chmod +x /usr/local/bin/run
-fi
+chmod +x "$RUN_FILE"
 
-# --- 8. Buat script `vt` untuk manajemen ---
-if [ ! -f /usr/local/bin/vt ]; then
-    echo -e "${GREEN}[7/7] Membuat perintah 'vt'...${NC}"
-    cat > /usr/local/bin/vt <<'EOF'
+# --- 8. Buat script `vt` (dengan restart) ---
+echo -e "${GREEN}[7/7] Membuat perintah 'vt'...${NC}"
+cat > "$VT_FILE" <<'EOF'
 #!/bin/bash
 # vt - Manajemen Worker
 
@@ -371,18 +375,17 @@ case "$1" in
     disconnect) cmd_disconnect "$2" ;;
     restart) cmd_restart ;;
     help|--help|-h|"") show_help ;;
-    *) echo -e "${RED}Perintah tidak dikenal.${NC}"; show_help ;;
+    *) echo -e "${RED}Perintah tidak dikenal. Gunakan: vt [list|add|disconnect|restart|help]${NC}"; show_help ;;
 esac
 EOF
-    chmod +x /usr/local/bin/vt
-fi
+chmod +x "$VT_FILE"
 
 # --- 9. Restart PM2 jika diminta ---
 if [ "$ACTION" = "restart" ] || [ ${#EXISTING_WORKERS[@]} -gt 0 ]; then
     echo -e "${YELLOW}Apakah Anda ingin merestart semua proses PM2 dengan wrapper? (y/n)${NC}"
     read -r RESTART_PM2
     if [[ "$RESTART_PM2" =~ ^[Yy]$ ]]; then
-        /usr/local/bin/vt restart
+        "$VT_FILE" restart
     else
         echo -e "${YELLOW}Anda bisa menjalankan 'vt restart' nanti.${NC}"
     fi
@@ -390,13 +393,13 @@ else
     echo -e "${YELLOW}Apakah ingin langsung restart PM2 sekarang? (y/n)${NC}"
     read -r RESTART_PM2
     if [[ "$RESTART_PM2" =~ ^[Yy]$ ]]; then
-        /usr/local/bin/vt restart
+        "$VT_FILE" restart
     fi
 fi
 
 # --- 10. Selesai ---
 echo -e "${GREEN}============================================================${NC}"
-echo -e "${GREEN}✅ SEMUA SELESAI!${NC}"
+echo -e "${GREEN}✅ SEMUA SELESAI! (Versi $VERSION)${NC}"
 echo -e "Perintah tersedia:"
 echo -e "  ${BLUE}run \"perintah\"${NC}    - jalankan perintah di worker"
 echo -e "  ${BLUE}vt list${NC}           - lihat worker + status"
@@ -407,6 +410,6 @@ echo -e "Worker terdaftar:"
 [ -s "$WORKER_FILE" ] && cat "$WORKER_FILE" | while read -r line; do echo "  - $line"; done || echo "  (tidak ada)"
 echo -e "${GREEN}============================================================${NC}"
 echo -e "${YELLOW}Catatan:${NC}"
-echo "  • Semua perintah berat dari bot akan otomatis dijalankan di worker."
-echo "  • Untuk mengaktifkan perubahan di shell saat ini, jalankan: source ~/.bashrc"
-echo "  • Jika ada worker baru, jalankan 'vt add' lalu 'vt restart' untuk aktifkan."
+echo "  • Untuk memuat alias, jalankan: source ~/.bashrc"
+echo "  • e=exit, b=back pada saat input data"
+echo "  • Jika ada worker baru, jalankan 'vt add' lalu 'vt restart'"
